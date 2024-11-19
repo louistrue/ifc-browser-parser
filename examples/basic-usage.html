@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>IFC Browser Parser - Basic Usage</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            line-height: 1.6;
+        }
+        .dropzone {
+            border: 2px dashed #ccc;
+            border-radius: 4px;
+            padding: 20px;
+            text-align: center;
+            margin: 20px 0;
+            cursor: pointer;
+        }
+        .dropzone.dragover {
+            border-color: #000;
+            background: #f0f0f0;
+        }
+        pre {
+            background: #f5f5f5;
+            padding: 15px;
+            border-radius: 4px;
+            overflow-x: auto;
+        }
+        .error {
+            color: #d00;
+            margin: 10px 0;
+        }
+    </style>
+</head>
+<body>
+    <h1>IFC Browser Parser Demo</h1>
+    <div id="dropzone" class="dropzone">
+        Drop an IFC file here or click to select
+        <input type="file" id="fileInput" accept=".ifc" style="display: none">
+    </div>
+    <div id="error" class="error"></div>
+    <h2>Parsing Result:</h2>
+    <pre id="output">No file parsed yet</pre>
+
+    <script type="module">
+        import { parse, parseAsync, isIfcFile } from '../dist/index.js';
+
+        const dropzone = document.getElementById('dropzone');
+        const fileInput = document.getElementById('fileInput');
+        const output = document.getElementById('output');
+        const error = document.getElementById('error');
+
+        // Handle drag and drop
+        dropzone.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            dropzone.classList.add('dragover');
+        });
+
+        dropzone.addEventListener('dragleave', () => {
+            dropzone.classList.remove('dragover');
+        });
+
+        dropzone.addEventListener('drop', (e) => {
+            e.preventDefault();
+            dropzone.classList.remove('dragover');
+            handleFiles(e.dataTransfer.files);
+        });
+
+        // Handle file input
+        dropzone.addEventListener('click', () => {
+            fileInput.click();
+        });
+
+        fileInput.addEventListener('change', (e) => {
+            handleFiles(e.target.files);
+        });
+
+        async function handleFiles(files) {
+            error.textContent = '';
+            const file = files[0];
+            
+            if (!file || !isIfcFile(file.name)) {
+                error.textContent = 'Please select an IFC file';
+                return;
+            }
+
+            try {
+                const content = await file.text();
+                const result = await parseAsync(content, { worker: true });
+                
+                output.textContent = JSON.stringify(result, null, 2);
+                
+                // Log some basic statistics
+                console.log(`Parsed ${result.entities.length} entities`);
+                console.log(`Found ${result.errors.length} errors`);
+                
+            } catch (err) {
+                error.textContent = `Error parsing file: ${err.message}`;
+                console.error(err);
+            }
+        }
+    </script>
+</body>
+</html>
