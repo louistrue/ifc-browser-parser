@@ -108,6 +108,53 @@ const wallMaterials = walls.flatMap(wall =>
 );
 ```
 
+## 📁 Project Structure
+
+```
+ifc-browser-parser/
+├── src/                   # Source code
+│   ├── core/             # Core parsing engine
+│   ├── patterns/         # IFC pattern definitions
+│   ├── utils/            # Utility functions
+│   ├── ifc-elements.ts   # IFC element definitions
+│   └── index.ts          # Main entry point
+├── __tests__/            # Test suites
+├── examples/             # Usage examples
+├── dist/                 # Compiled output
+└── vitest.config.ts      # Test configuration
+```
+
+### 🔧 Key Components
+
+<details>
+<summary>📦 Core Components</summary>
+
+- **Core Parser**: Heart of the system, handles IFC file parsing and interpretation
+- **Pattern Definitions**: Regular expressions and patterns for IFC syntax parsing
+- **Element Handlers**: Processes and validates IFC elements
+- **Utility Functions**: Common operations and helper functions
+
+</details>
+
+<details>
+<summary>🏗️ Architecture Overview</summary>
+
+1. **Input Processing**
+   - File reading and initial validation
+   - Stream-based parsing for memory efficiency
+
+2. **Element Processing**
+   - Pattern matching and element identification
+   - Relationship graph construction
+   - Material association
+
+3. **Data Access**
+   - Query interface for element retrieval
+   - Filtering and search capabilities
+   - Relationship traversal
+
+</details>
+
 ## Development
 
 ### Prerequisites
@@ -131,22 +178,6 @@ npm install
 3. Run tests
 ```bash
 npm test
-```
-
-### Project Structure
-
-```
-ifc-browser-parser/
-├── src/
-│   ├── core/
-│   │   ├── parser.ts       # Main parser implementation
-│   │   └── types.ts        # TypeScript type definitions
-│   └── patterns/
-│       └── index.ts        # IFC pattern matching
-├── __tests__/
-│   ├── files/             # Test IFC files
-│   └── parser.test.ts     # Parser test suite
-└── package.json
 ```
 
 ## Testing
