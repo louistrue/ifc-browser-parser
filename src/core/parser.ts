@@ -12,7 +12,8 @@ import {
   TokenType,
   ParserState,
   IFCMaterial,
-  IFCWall
+  IFCWall,
+  IFCElementProperties
 } from './types';
 
 import { Tokenizer } from './tokenizer';
@@ -27,7 +28,38 @@ interface IFCWall {
     name: string;
     thickness?: number;
     layerSetName?: string;
+    layerName?: string;
   }[];
+}
+
+interface IFCElementProperties {
+  id: string;
+  type: string;
+  name: string;
+  materials: {
+    name: string;
+    thickness?: number;
+    layerSetName?: string;
+    layerName?: string;
+  }[];
+  geometricRepresentation?: any;
+  buildingStorey?: string;
+  isLoadBearing?: boolean;
+  isExternal?: boolean;
+}
+
+interface IMaterial {
+  name: string;
+  thickness?: number;
+  layerSetName?: string;
+  layerName?: string;
+}
+
+interface IFCAnalysis {
+  elements: IFCElementProperties[];
+  elementsByType: { [key: string]: number };
+  elementsByStorey: { [key: string]: { [key: string]: number } };
+  materialUsage: { [key: string]: { [key: string]: number } };
 }
 
 export class IFCParser {
@@ -78,27 +110,61 @@ export class IFCParser {
     };
   }
   
-  async parse(content: string): Promise<ParseResult> {
+  async parse(content: string): Promise<IFCAnalysis> {
     this.reset();
     
     const lines = content.split('\n');
     
     for (const line of lines) {
-      if (line.startsWith('#')) {
+      if (line.trim()) {
         this.parseLine(line);
       }
     }
     
-    this.processRelationships();
+    const relationships = this.processMaterialRelationships();
+    const elements = this.getElementProperties(relationships);
     
     return {
-      projectName: this.state.projectName,
-      wallNames: this.state.wallNames || [],
-      relationships: this.state.relationships,
-      errors: this.errors,
-      buildingElements: this.state.buildingElements || [],
-      buildingStoreys: this.state.buildingStoreys || [],
-      walls: this.getWalls()
+      elements,
+      elementsByType: Object.fromEntries(elements.reduce((acc, element) => {
+        acc.set(element.type, (acc.get(element.type) || 0) + 1);
+        return acc;
+      }, new Map<string, number>())),
+      elementsByStorey: Object.fromEntries(
+        Array.from(elements.reduce((acc, element) => {
+          const storey = element.buildingStorey || 'Unknown Storey';
+          if (!acc.has(storey)) {
+            acc.set(storey, new Map());
+          }
+          const storeyElements = acc.get(storey)!;
+          storeyElements.set(element.type, (storeyElements.get(element.type) || 0) + 1);
+          return acc;
+        }, new Map<string, Map<string, number>>()).entries()).map(([storey, elements]) => [
+          storey,
+          Object.fromEntries(elements)
+        ])
+      ),
+      materialUsage: Object.fromEntries(
+        Array.from(elements.reduce((acc, element) => {
+          if (element.materials && element.materials.length > 0) {
+            if (!acc.has(element.type)) {
+              acc.set(element.type, new Map());
+            }
+            const typeMaterials = acc.get(element.type)!;
+            for (const material of element.materials) {
+              const materialKey = material.name + 
+                (material.layerSetName ? ` [${material.layerSetName}]` : '') +
+                (material.thickness ? ` ${material.thickness}mm` : '') +
+                (material.layerName ? ` (${material.layerName})` : '');
+              typeMaterials.set(materialKey, (typeMaterials.get(materialKey) || 0) + 1);
+            }
+          }
+          return acc;
+        }, new Map<string, Map<string, number>>()).entries()).map(([type, materials]) => [
+          type,
+          Object.fromEntries(materials)
+        ])
+      )
     };
   }
   
@@ -128,6 +194,7 @@ export class IFCParser {
     // Handle different IFC types
     switch (type) {
       case 'IFCWALL':
+      case 'IFCWALLSTANDARDCASE':
         const wall: IFCWall = {
           id,
           name: nameStr,
@@ -188,6 +255,113 @@ export class IFCParser {
         });
         break;
     }
+  }
+
+  private processMaterialRelationships(): Map<string, { materials: any[], spatialStructure?: any }> {
+    const relationships = new Map<string, { materials: any[], spatialStructure?: any }>();
+
+    console.log('[DEBUG] Processing relationships');
+    for (const entity of this.state.entities.values()) {
+      if (entity.type === 'IFCRELCONTAINEDINSPATIALSTRUCTURE') {
+        console.log('[DEBUG] Processing spatial relationship:', {
+          id: entity.id,
+          type: entity.type,
+          attributes: entity.attributes,
+          name: entity.name
+        });
+
+        const relatedElements = this.parseList(entity.attributes[4]);
+        const storey = this.state.entities.get(this.stripHashFromId(entity.attributes[5]));
+
+        for (const elementRef of relatedElements) {
+          const elementId = this.stripHashFromId(elementRef);
+          const existing = relationships.get(elementId) || { materials: [] };
+          existing.spatialStructure = storey;
+          relationships.set(elementId, existing);
+        }
+      } else if (entity.type === 'IFCRELASSOCIATESMATERIAL') {
+        console.log('[DEBUG] Processing material relationship:', {
+          id: entity.id,
+          type: entity.type,
+          attributes: entity.attributes,
+          name: entity.name
+        });
+
+        const relatedElements = this.parseList(entity.attributes[4]);
+        const materialRef = this.stripHashFromId(entity.attributes[5]);
+        const materialEntity = this.state.entities.get(materialRef);
+
+        if (materialEntity) {
+          let materials: any[] = [];
+          console.log('[DEBUG] Processing material entity:', {
+            type: materialEntity.type,
+            id: materialEntity.id,
+            name: materialEntity.name
+          });
+          
+          if (materialEntity.type === 'IFCMATERIALLAYERSETUSAGE') {
+            // Get the layer set from usage
+            const layerSetRef = this.stripHashFromId(materialEntity.attributes[0]);
+            const layerSet = this.state.entities.get(layerSetRef);
+            if (layerSet && layerSet.type === 'IFCMATERIALLAYERSET') {
+              const layerRefs = this.parseList(layerSet.attributes[0]);
+              materials = layerRefs.map(ref => {
+                const layer = this.state.entities.get(this.stripHashFromId(ref));
+                if (layer && layer.type === 'IFCMATERIALLAYER') {
+                  const materialRef = this.stripHashFromId(layer.attributes[0]);
+                  const material = this.state.entities.get(materialRef);
+                  const thickness = parseFloat(layer.attributes[1] || '0.000').toFixed(3);
+                  return {
+                    name: material ? material.name || 'Unknown Material' : 'Unknown Material',
+                    thickness: thickness
+                  };
+                }
+                return null;
+              }).filter(Boolean);
+            }
+          } else if (materialEntity.type === 'IFCMATERIALCONSTITUENTSET') {
+            const constituentRefs = this.parseList(materialEntity.attributes[0]);
+            materials = constituentRefs.map(ref => {
+              const constituent = this.state.entities.get(this.stripHashFromId(ref));
+              if (constituent && constituent.type === 'IFCMATERIALCONSTITUENT') {
+                const materialRef = this.stripHashFromId(constituent.attributes[2]);
+                const material = this.state.entities.get(materialRef);
+                // Look for width in properties
+                let thickness = '0.000';
+                const widthRef = constituent.attributes[3];
+                if (widthRef) {
+                  const width = this.state.entities.get(this.stripHashFromId(widthRef));
+                  if (width && width.type === 'IFCQUANTITYLENGTH') {
+                    thickness = parseFloat(width.attributes[3] || '0.000').toFixed(3);
+                  }
+                }
+                return {
+                  name: material ? material.name || 'Unknown Material' : 'Unknown Material',
+                  thickness: thickness
+                };
+              }
+              return null;
+            }).filter(Boolean);
+          } else if (materialEntity.type === 'IFCMATERIAL') {
+            materials = [{
+              name: materialEntity.name || 'Unknown Material',
+              thickness: '0.000'
+            }];
+          }
+
+          console.log('[DEBUG] Processed materials:', materials);
+
+          for (const elementRef of relatedElements) {
+            const elementId = this.stripHashFromId(elementRef);
+            const existing = relationships.get(elementId) || { materials: [] };
+            existing.materials = materials;
+            relationships.set(elementId, existing);
+          }
+        }
+      }
+    }
+
+    return relationships;
   }
 
   private parseAttributes(line: string): any[] {
@@ -300,268 +474,126 @@ export class IFCParser {
     return id.startsWith('#') ? id.substring(1) : id
   }
 
-  getWalls(): IFCWall[] {
-    // Process relationships to find building storeys and materials
-    for (const [, rel] of this.state.relationshipAssigns) {
-      if (rel.type === 'IFCRELCONTAINEDINSPATIALSTRUCTURE') {
-        const storey = this.state.entities.get(rel.relatingId);
-        if (storey && storey.type === 'IFCBUILDINGSTOREY') {
-          for (const elementId of rel.relatedIds) {
-            const wall = this.state.walls.find(w => w.id === elementId);
-            if (wall) {
-              wall.buildingStorey = storey.name;
+  private getElementProperties(relationships: Map<string, { materials: any[], spatialStructure?: any }>): IFCElementProperties[] {
+    // First collect all shape representations
+    const shapeRepresentations = new Map<string, any>();
+    for (const entity of this.state.entities.values()) {
+      if (entity.type === 'IFCSHAPEREPRESENTATION') {
+        const context = entity.attributes[0];
+        const identifier = this.parseAttributeValue(entity.attributes[1]);
+        const type = this.parseAttributeValue(entity.attributes[2]);
+        const items = this.parseList(entity.attributes[3]);
+        
+        console.log('[DEBUG] Found shape representation', entity.id + ':', {
+          context,
+          identifier,
+          type,
+          items
+        });
+        
+        shapeRepresentations.set(entity.id, {
+          id: entity.id,
+          type: entity.type,
+          representationType: type,
+          representationIdentifier: identifier,
+          items: items.map(id => this.state.entities.get(this.stripHashFromId(id)))
+        });
+      }
+    }
+    console.log('[DEBUG] Found', shapeRepresentations.size, 'shape representations')
+
+    // Then collect all product definition shapes
+    const productDefinitionShapes = new Map<string, string[]>();
+    for (const entity of this.state.entities.values()) {
+      if (entity.type === 'IFCPRODUCTDEFINITIONSHAPE') {
+        const representations = this.parseList(entity.attributes[2]);
+        console.log('[DEBUG] Found product definition shape', entity.id, 'with representations:', representations);
+        productDefinitionShapes.set(entity.id, representations.map(id => this.stripHashFromId(id)));
+      }
+    }
+    console.log('[DEBUG] Found', productDefinitionShapes.size, 'product definition shapes')
+
+    // Find all building elements with product definition shapes
+    const elementProperties: IFCElementProperties[] = [];
+    for (const entity of this.state.entities.values()) {
+      if (entity.type.startsWith('IFC') && 
+          !entity.type.startsWith('IFCRELATIONSHIP') && 
+          !entity.type.startsWith('IFCPROPERTYSET') &&
+          !entity.type.startsWith('IFCOWNERHISTORY') &&
+          !entity.type.startsWith('IFCPROJECT') &&
+          !entity.type.startsWith('IFCSITE') &&
+          !entity.type.startsWith('IFCBUILDING') &&
+          !entity.type.startsWith('IFCBUILDINGSTOREY') &&
+          !entity.type.startsWith('IFCGEOMETRIC') &&
+          !entity.type.startsWith('IFCMATERIAL') &&
+          !entity.type.startsWith('IFCPRESENTATION') &&
+          !entity.type.startsWith('IFCPRODUCTDEFINITION') &&
+          !entity.type.startsWith('IFCSHAPE')) {
+        
+        // Look for representation in the entity's attributes
+        let hasGeometry = false;
+        let geometricRepresentation = undefined;
+        
+        // Check if this entity has a representation
+        for (let i = 0; i < entity.attributes.length; i++) {
+          const attr = entity.attributes[i];
+          if (attr && typeof attr === 'string' && attr.startsWith('#')) {
+            const refId = this.stripHashFromId(attr);
+            if (productDefinitionShapes.has(refId)) {
+              hasGeometry = true;
+              const representationShapes = productDefinitionShapes.get(refId);
+              if (representationShapes) {
+                geometricRepresentation = representationShapes
+                  .map(id => shapeRepresentations.get(id))
+                  .filter(Boolean);
+              }
+              break;
+            }
+          } else if (attr && typeof attr === 'string' && attr.includes('(#')) {
+            // Handle list format like "(#123,#456)"
+            const matches = attr.match(/#\d+/g);
+            if (matches) {
+              for (const match of matches) {
+                const refId = this.stripHashFromId(match);
+                if (productDefinitionShapes.has(refId)) {
+                  hasGeometry = true;
+                  const representationShapes = productDefinitionShapes.get(refId);
+                  if (representationShapes) {
+                    geometricRepresentation = representationShapes
+                      .map(id => shapeRepresentations.get(id))
+                      .filter(Boolean);
+                  }
+                  break;
+                }
+              }
             }
           }
         }
-      }
-    }
 
-    // Process material layers
-    for (const wall of this.state.walls) {
-      const entity = this.state.entities.get(wall.id);
-      if (!entity) continue;
+        if (hasGeometry) {
+          console.log('[DEBUG] Processing building element:', entity.id, entity.type, 'with geometry');
+          
+          // Get relationship info
+          const relationship = relationships.get(entity.id) || { 
+            materials: [], 
+            spatialStructure: { name: 'Unknown Storey' } 
+          };
 
-      // Find material usage
-      for (const [, usage] of this.state.materialLayerSetUsages) {
-        const layerSet = this.state.materialLayerSets.get(usage.layerSetId);
-        if (!layerSet) continue;
-
-        for (const layerId of layerSet.layerIds) {
-          const layer = this.state.materialLayers.get(layerId);
-          if (!layer) continue;
-
-          const material = this.state.entities.get(layer.materialId);
-          if (!material) continue;
-
-          wall.materials.push({
-            name: material.name,
-            thickness: layer.thickness,
-            layerSetName: layerSet.name
+          elementProperties.push({
+            id: entity.id,
+            type: entity.type,
+            name: entity.name || '',
+            materials: relationship.materials,
+            buildingStorey: relationship.spatialStructure?.name,
+            geometricRepresentation,
+            isLoadBearing: false,
+            isExternal: false
           });
         }
       }
-
-      // Get wall properties
-      wall.isExternal = this.getAttribute(entity, 'IsExternal') === true;
-      wall.isLoadBearing = this.getAttribute(entity, 'LoadBearing') === true;
     }
 
-    return this.state.walls;
-  }
-
-  getEntitiesWithGeometry(): IFCEntity[] {
-    console.log('[DEBUG] Looking for entities with geometry...')
-    console.log('[DEBUG] Total entities:', this.state.entities.size)
-    
-    const entitiesWithGeometry: IFCEntity[] = []
-    
-    // First find all shape representations
-    const shapeReps = new Map<string, IFCEntity>()
-    for (const entity of this.state.entities.values()) {
-      if (entity.type === 'IFCSHAPEREPRESENTATION') {
-        console.log(`[DEBUG] Found shape representation ${entity.id}:`, {
-          context: entity.attributes[0],
-          identifier: entity.attributes[1],
-          type: entity.attributes[2],
-          items: entity.attributes[3]
-        })
-        shapeReps.set(entity.id, entity)
-      }
-    }
-    console.log('[DEBUG] Found', shapeReps.size, 'shape representations')
-
-    // Then find all product definition shapes that use these representations
-    const prodDefShapes = new Map<string, IFCEntity>()
-    for (const entity of this.state.entities.values()) {
-      if (entity.type === 'IFCPRODUCTDEFINITIONSHAPE') {
-        const representations = this.parseList(entity.attributes[2])
-        const hasShapeRep = representations.some(repId => 
-          shapeReps.has(this.stripHashFromId(repId))
-        )
-        if (hasShapeRep) {
-          console.log(`[DEBUG] Found product definition shape ${entity.id} with representations:`, representations)
-          prodDefShapes.set(entity.id, entity)
-        }
-      }
-    }
-    console.log('[DEBUG] Found', prodDefShapes.size, 'product definition shapes')
-
-    // Finally find all entities that use these product definition shapes
-    for (const entity of this.state.entities.values()) {
-      // Product definition shape is at index 6 (representation) in most IFC entities
-      const productDefShape = entity.attributes[6]
-      if (productDefShape && typeof productDefShape === 'string') {
-        const shapeId = this.stripHashFromId(productDefShape)
-        if (prodDefShapes.has(shapeId)) {
-          console.log(`[DEBUG] Found entity ${entity.id} (${entity.type}) with shape ${productDefShape}`)
-          entitiesWithGeometry.push(entity)
-          continue
-        }
-      }
-      
-      // Also check index 7 (some entities use this index)
-      const altProductDefShape = entity.attributes[7]
-      if (altProductDefShape && typeof altProductDefShape === 'string') {
-        const shapeId = this.stripHashFromId(altProductDefShape)
-        if (prodDefShapes.has(shapeId)) {
-          console.log(`[DEBUG] Found entity ${entity.id} (${entity.type}) with shape ${altProductDefShape}`)
-          entitiesWithGeometry.push(entity)
-        }
-      }
-    }
-    
-    console.log('[DEBUG] Found', entitiesWithGeometry.length, 'entities with geometry')
-    return entitiesWithGeometry
-  }
-
-  getGeometricRepresentation(elementId: string): any {
-    console.log('[DEBUG] Getting geometric representation for', elementId)
-    const element = this.state.entities.get(elementId)
-    if (!element) {
-      console.log('[DEBUG] Element not found:', elementId)
-      return null
-    }
-
-    // Try both index 6 and 7 for product definition shape
-    let productDefShape = element.attributes[6]
-    if (!productDefShape || typeof productDefShape !== 'string') {
-      productDefShape = element.attributes[7]
-    }
-    
-    if (!productDefShape || typeof productDefShape !== 'string') {
-      console.log('[DEBUG] No product def shape for element', elementId)
-      return null
-    }
-
-    const shapeId = this.stripHashFromId(productDefShape)
-    const shape = this.state.entities.get(shapeId)
-    if (!shape || shape.type !== 'IFCPRODUCTDEFINITIONSHAPE') {
-      console.log('[DEBUG] Invalid shape for element', elementId, '- shape:', shape?.type)
-      return null
-    }
-
-    // Get shape representations
-    const representations = this.parseList(shape.attributes[2])
-    const result = []
-
-    for (const repId of representations) {
-      const cleanRepId = this.stripHashFromId(repId)
-      const rep = this.state.entities.get(cleanRepId)
-      if (rep && rep.type === 'IFCSHAPEREPRESENTATION') {
-        const items = this.parseList(rep.attributes[3])
-        const itemEntities = items.map(itemId => {
-          const cleanItemId = this.stripHashFromId(itemId)
-          const entity = this.state.entities.get(cleanItemId)
-          if (entity) {
-            return {
-              id: entity.id,
-              type: entity.type,
-              attributes: entity.attributes
-            }
-          }
-          return null
-        }).filter(Boolean)
-
-        result.push({
-          id: rep.id,
-          type: rep.type,
-          representationType: this.parseAttributeValue(rep.attributes[2]),
-          representationIdentifier: this.parseAttributeValue(rep.attributes[1]),
-          items: itemEntities
-        })
-      }
-    }
-
-    console.log('[DEBUG] Found geometric representation:', result)
-    return result
-  }
-
-  private processRelationships() {
-    console.log('[DEBUG] Processing relationships')
-    let materialRelations = 0;
-    let aggregateRelations = 0;
-
-    // First pass: Process material relationships
-    for (const entity of this.state.entities.values()) {
-      if (entity.type === 'IFCRELASSOCIATESMATERIAL') {
-        materialRelations++;
-        console.log('[DEBUG] Processing material relationship:', entity);
-        
-        // RelatedElements is at index 4, RelatingMaterial at index 5
-        const relatedElements = entity.attributes[4];
-        const relatingMaterial = entity.attributes[5];
-
-        if (relatedElements && relatingMaterial) {
-          // Handle both single and array of related elements
-          const elementIds = this.parseList(relatedElements);
-          
-          for (const elementId of elementIds) {
-            console.log('[DEBUG] Processing element:', elementId);
-            const element = this.state.entities.get(elementId);
-            
-            // Handle direct material or material set reference
-            let materialId = relatingMaterial;
-            const relatingEntity = this.state.entities.get(relatingMaterial);
-            
-            if (relatingEntity) {
-              if (relatingEntity.type === 'IFCMATERIALLAYERSET') {
-                // If it's a layer set, get the first layer's material
-                const layers = this.parseList(relatingEntity.attributes[0]);
-                if (layers.length > 0) {
-                  const firstLayer = this.state.entities.get(layers[0]);
-                  if (firstLayer && firstLayer.type === 'IFCMATERIALLAYER') {
-                    materialId = firstLayer.attributes[0];
-                  }
-                }
-              } else if (relatingEntity.type === 'IFCMATERIAL') {
-                // If it's already a material, use it directly
-                materialId = relatingEntity.id;
-              }
-            }
-            
-            const material = this.state.entities.get(materialId);
-            
-            if (element && material) {
-              if (!this.state.relationships.has(elementId)) {
-                this.state.relationships.set(elementId, { materials: [], aggregates: [] });
-              }
-              const relationships = this.state.relationships.get(elementId)!;
-              if (!relationships.materials.includes(material)) {
-                relationships.materials.push(material);
-              }
-            }
-          }
-        }
-      }
-    }
-
-    // Second pass: Process aggregate relationships
-    for (const entity of this.state.entities.values()) {
-      if (entity.type === 'IFCRELAGGREGATES') {
-        aggregateRelations++;
-        const relatingObject = entity.attributes[4];
-        const relatedObjects = entity.attributes[5];
-
-        if (relatingObject && relatedObjects) {
-          const parent = this.state.entities.get(relatingObject);
-          const childIds = this.parseList(relatedObjects);
-
-          for (const childId of childIds) {
-            const child = this.state.entities.get(childId);
-            if (parent && child) {
-              if (!this.state.relationships.has(childId)) {
-                this.state.relationships.set(childId, { materials: [], aggregates: [] });
-              }
-              const relationships = this.state.relationships.get(childId)!;
-              relationships.aggregates.push(parent);
-            }
-          }
-        }
-      }
-    }
-
-    console.log('[DEBUG] Found material relations:', materialRelations);
-    console.log('[DEBUG] Found aggregate relations:', aggregateRelations);
-    console.log('[DEBUG] Final relationships:', this.state.relationships);
+    console.log('[DEBUG] Found', elementProperties.length, 'building elements');
+    return elementProperties;
   }
 }

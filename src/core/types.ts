@@ -45,6 +45,7 @@ export interface ParseOptions {
 export interface ParseResult {
   entities: Map<string, IFCEntity>;
   relationships: Map<string, string[]>;
+  elements: IFCElementProperties[];
   errors: IfcParserError[];
   success: boolean;
   error?: ParseError;
@@ -143,6 +144,21 @@ export interface IFCGeometricRepresentation {
   type: string;
   representationType: string;
   items: any[];
+}
+
+export interface IFCElementProperties {
+  id: string;
+  type: string;
+  name: string;
+  buildingStorey?: string;
+  isLoadBearing?: boolean;
+  isExternal?: boolean;
+  geometricRepresentation?: any;
+  materials: {
+    name: string;
+    thickness?: number;
+    layerSetName?: string;
+  }[];
 }
 
 export enum TokenType {
