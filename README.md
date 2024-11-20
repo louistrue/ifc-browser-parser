@@ -46,15 +46,67 @@ for (const wall of walls) {
 
 ```
 
-## Supported IFC Elements
+## 🏗️ IFC Element Concept
 
-Currently supports parsing of:
-- Walls (IFCWALL)
-- Shape Representations (IFCSHAPEREPRESENTATION)
-- Product Definition Shapes (IFCPRODUCTDEFINITIONSHAPE)
-- Material Layers
-- Material Layer Sets
-- Material Layer Set Usage
+> Industry Foundation Classes (IFC) elements are the building blocks of your BIM models. Here's how we handle them.
+
+<details>
+<summary>🔍 What is an IFC Element?</summary>
+
+An IFC element represents any physical or abstract component in a building model - from walls and doors to spaces and zones. Each element carries rich metadata about its properties, relationships, and position in the building hierarchy.
+
+</details>
+
+### 📊 Element Structure
+
+```typescript
+interface IFCElement {
+  id: string;        // Unique identifier
+  type: string;      // e.g., IfcWall, IfcDoor
+  name: string;      // Human-readable name
+  buildingStory?: string;  // Level location
+  materials: Material[];   // Associated materials
+  volume?: string;   // Volumetric data
+}
+```
+
+### 🎨 Material Properties
+
+| Property | Description | Example |
+|----------|-------------|---------|
+| `name` | Material identifier | "Concrete" |
+| `fraction` | Volume fraction | 0.75 |
+| `count` | Instance count | 1 |
+| `layerSetName` | Layer configuration | "External Wall" |
+| `volume` | Material volume | "2.5m³" |
+
+### 🔗 Key Features
+
+- ✨ **Rich Metadata**: Each element maintains comprehensive property data
+- 🌳 **Hierarchical**: Elements understand their place in the building structure
+- 🤝 **Relational**: Built-in support for element-to-element relationships
+- 📏 **Geometric**: Optional geometric and volumetric properties
+- 🎯 **Type-Safe**: Full TypeScript support with strict typing
+
+### 💡 Usage Example
+
+```typescript
+// Get all walls from a specific story
+const walls = parser.getElements()
+  .filter(element => 
+    element.type === 'IfcWall' && 
+    element.buildingStory === 'Level 1'
+  );
+
+// Analyze wall materials
+const wallMaterials = walls.flatMap(wall => 
+  wall.materials.map(material => ({
+    wallId: wall.id,
+    material: material.name,
+    volume: material.volume
+  }))
+);
+```
 
 ## Development
 
